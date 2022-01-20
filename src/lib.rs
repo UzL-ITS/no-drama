@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod rank_bank;
 
 use core::arch::x86_64;
 use core::ptr;
