@@ -29,7 +29,7 @@ const fn parity(value: u64) -> u64 {
 /// let value :u64 = 0x5;
 /// ```
 /// returns `[1,0,1]`
-fn evaluate_addr_function(masks: &Vec<u64>, value: u64) -> Vec<u64> {
+pub fn evaluate_addr_function(masks: &Vec<u64>, value: u64) -> Vec<u64> {
     masks.iter().map(|m| parity(value & m)).collect()
 }
 
@@ -60,9 +60,87 @@ fn all_sets_filled(
     }
 }
 
+struct XBitPermutationIter {
+    last_mask: u64,
+    current_mask: u64,
+    inited: bool,
+}
+
+impl XBitPermutationIter {
+    ///msb is *NOT* index but logical counting (i.e. first is 1)
+    fn new(bit_count: usize, msb: usize, initial_shift: usize) -> XBitPermutationIter {
+        let first_mask = (1u64 << bit_count) - 1;
+        let last_mask = first_mask << (msb - bit_count);
+
+        let first_mask = first_mask << initial_shift;
+        let last_mask = last_mask << initial_shift;
+
+        XBitPermutationIter {
+            current_mask: first_mask,
+            last_mask,
+            inited: false,
+        }
+    }
+}
+
+impl Iterator for XBitPermutationIter {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_mask == self.last_mask {
+            return None;
+        }
+        if !self.inited {
+            self.inited = true;
+            return Some(self.current_mask);
+        }
+
+        let t = self.current_mask | self.current_mask.wrapping_sub(1);
+        self.current_mask = t.wrapping_add(1)
+            | ((!t & ((!t).overflowing_neg()).0)
+                .wrapping_sub(1)
+                .overflowing_shr(self.current_mask.trailing_zeros() + 1))
+            .0;
+
+        Some(self.current_mask)
+    }
+}
+#[cfg(test)]
+mod test_x_bit_permutation_iter {
+    use super::XBitPermutationIter;
+    #[test]
+    fn test_permutations_simple() {
+        let perm_iter = XBitPermutationIter::new(2, 3, 0);
+        let want_values: Vec<u64> = vec![0x3, 0x5, 0x6];
+        let got_values = perm_iter.collect::<Vec<u64>>();
+        assert_eq!(
+            want_values, got_values,
+            "Wanted {:x?} got {:x?},",
+            want_values, got_values
+        );
+    }
+
+    #[test]
+    fn test_permutations_large() {
+        let bit_count = 3;
+        let msb = 10;
+        let perm_iter = XBitPermutationIter::new(bit_count, msb, 0);
+        //there should be "bit_count choose msb" many results
+        let want_result_count = 120;
+
+        let got_result_count = perm_iter.count();
+
+        assert_eq!(
+            want_result_count, got_result_count,
+            "Unexpected number of results, wanted {} got {}",
+            want_result_count, got_result_count
+        )
+    }
+}
+
 ///DramAnalyzer allows to reverse engineer the rank/bank and row mapping of DRAM memory
 /// based on the timing side channel presented in the DRAMA paper
-struct DramAnalyzer {
+pub struct DramAnalyzer {
     memory_source: Box<dyn super::memory::MemorySource>,
     timer: Box<dyn super::MemoryTupleTimer>,
     ///average timing measurements over this many repetitions
@@ -72,6 +150,179 @@ struct DramAnalyzer {
 }
 
 impl DramAnalyzer {
+    /// Removes linear dependents masks from the input and returns results in a new vec
+    ///
+    ///Directly taken from trrespass drama code
+    /// Original comment: https://www.cs.umd.edu/~gasarch/TOPICS/factoring/fastgauss.pdf gaussian elimination in GF2
+    fn remove_linear_dependent_masks(masks: &Vec<u64>) -> Result<Vec<u64>> {
+        //compute matrix dimensions
+        let height = masks.len();
+        let width = match masks.iter().map(|v| 64 - v.leading_zeros()).max() {
+            None => bail!("masks vec may not be empty"),
+            Some(v) => v as usize,
+        };
+        //fill matrix
+        let mut matrix = vec![vec![false; width]; height];
+
+        for i in 0..height {
+            for j in 0..width {
+                // != 0 to convert to bool as C would do
+                matrix[i][width - j - 1] = (masks[i] & (1_u64 << j)) != 0;
+            }
+        }
+
+        //also build transposed matrix. N.B: suffix _t on the names
+        let height_t = width;
+        let width_t = height;
+        let mut matrix_t = vec![vec![false; width_t]; height_t];
+
+        for i in 0..height {
+            for j in 0..width {
+                // != 0 to convert to bool
+                matrix_t[j][i] = matrix[i][j];
+            }
+        }
+
+        //i guess row reduce algorithm to get rid of linear combinations?
+
+        let mut pvt_col = 0;
+        let mut filtered_masks = Vec::new();
+
+        while pvt_col < width_t {
+            for row in 0..height_t {
+                if matrix_t[row][pvt_col] {
+                    filtered_masks.push(masks[pvt_col]);
+                    for c in 0..width_t {
+                        if c == pvt_col {
+                            continue;
+                        }
+                        if !(matrix_t[row][c]) {
+                            continue;
+                        }
+
+                        //original comment : column sum
+                        for r in 0..height_t {
+                            //Compute "XOR" of the two bool values. N.B. that "!=" on bool equals XOR
+                            //on GF(2)
+                            matrix_t[r][c] = matrix_t[r][c] != matrix_t[r][pvt_col];
+                        }
+                    }
+                    break;
+                }
+            }
+            pvt_col += 1;
+        }
+
+        Ok(filtered_masks)
+    }
+
+    /// Selects one representative for each set and checks that the rest of the values inside
+    /// the set have the same value when ANDed with mask. Returns the number of entries that fail this test.
+    ///
+    /// #Arguments
+    /// * `row_conflict_sets` sets of address that have a row conflict (same rank+bank but different row)
+    /// * `rank_bank_function_candidate` candidate for a single bit of the rank bank function in bitmask form.
+    ///
+    /// We could also check all pairs inside a set, but a single representative should be fine
+    /// The reasoning for this test is to find rank_bank address masks matching all the observations that we made
+    fn check_conflict_sets_against_function(
+        row_conflict_sets: &Vec<HashSet<MemoryAddress>>,
+        rank_bank_function_candidate: u64,
+    ) -> Result<usize> {
+        let mut counter_examples = 0;
+        for set in row_conflict_sets.iter() {
+            if set.len() == 0 {
+                bail!("found set with zero elements, this should never happen");
+            }
+            let set_representative = set.iter().take(1).collect::<Vec<&MemoryAddress>>()[0];
+            let set_representative_fn_value =
+                &parity(set_representative.phys & rank_bank_function_candidate);
+            counter_examples += set
+                .iter()
+                .skip(1)
+                .map(|e| parity(e.phys & rank_bank_function_candidate))
+                .filter(|v| v != set_representative_fn_value)
+                .count();
+        }
+
+        return Ok(counter_examples);
+    }
+
+    /// Selects all functions from the configured search space that "explains" the conflict sets passed to this function
+    /// (the functions are evaluated on the physical address).
+    /// The result still contains linear dependent function masks
+    /// For the search space, we assume a XOR function. As we wan to "explain" the observations the function needs
+    /// log2(row_conflict_sets.len()) bits. Each bit of the function may depend on at most `max_function_bits`
+    /// which we will represent a AND bit mask. The MSB of each mask is restricted by `msb_index_for_function`.
+    /// The first `ignore_low_bits` bits of each address are ignored
+    ///
+    /// #Arguments
+    /// *`row_conflict_sets` : sets of address that have a row conflict (same rank+bank but different row)
+    ///  * `max_function_bits` : max amount of bits for a single mask
+    /// * `msb_index_for_function` highest bit (INDEX) of the physical address that is still considered/included in the masks
+    /// * `ignore_low_bits` ignore this many low bits of the physical address
+    fn compute_rank_bank_function_candidates(
+        row_conflict_sets: &Vec<HashSet<MemoryAddress>>,
+        max_function_bits: usize,
+        msb_index_for_function: usize,
+        ignore_low_bits: usize,
+    ) -> Result<Vec<u64>> {
+        let mut candidates: Vec<u64> = Vec::new();
+
+        //iterate over functions with increasing bit complexity
+        for current_max_bits in 1..=max_function_bits {
+            //iterate over permutations with current_max_bits set (lower than  msb_index_for_function)
+            for mask in XBitPermutationIter::new(
+                current_max_bits,
+                msb_index_for_function + 1,
+                ignore_low_bits,
+            ) {
+                let counter_examples =
+                    DramAnalyzer::check_conflict_sets_against_function(&row_conflict_sets, mask)
+                        .with_context(|| "failed to evaluate function on row conflict sets")?;
+                if counter_examples == 0 {
+                    candidates.push(mask);
+                }
+            }
+        }
+
+        match candidates.len() {
+            0 => bail!("Did not find any matching functions"),
+            _ => Ok(candidates),
+        }
+    }
+
+    /// Selects all functions from the configured search space that "explains" the conflict sets passed to this function
+    /// (the functions are evaluated on the physical address).
+    /// For the search space, we assume a XOR function. As we wan to "explain" the observations the function needs
+    /// log2(row_conflict_sets.len()) bits. Each bit of the function may depend on at most `max_function_bits`
+    /// which we will represent a AND bit mask. The MSB of each mask is restricted by `msb_index_for_function`.
+    /// The first `ignore_low_bits` bits of each address are ignored
+    ///
+    /// #Arguments
+    /// *`row_conflict_sets` : sets of address that have a row conflict (same rank+bank but different row)
+    ///  * `max_function_bits` : max amount of bits for a single mask
+    /// * `msb_index_for_function` highest bit (INDEX) of the physical address that is still considered/included in the masks
+    /// * `ignore_low_bits` ignore this many low bits of the physical address
+    pub fn compute_rank_bank_functions(
+        &self,
+        row_conflict_sets: &Vec<HashSet<MemoryAddress>>,
+        max_function_bits: usize,
+        msb_index_for_function: usize,
+        ignore_low_bits: usize,
+    ) -> Result<Vec<u64>> {
+        let function_candidates = DramAnalyzer::compute_rank_bank_function_candidates(
+            row_conflict_sets,
+            max_function_bits,
+            msb_index_for_function,
+            ignore_low_bits,
+        )
+        .with_context(|| "compute_rank_bank_function_candidates failed")?;
+
+        DramAnalyzer::remove_linear_dependent_masks(&function_candidates)
+            .with_context(|| "remove_linear_dependent_masks failed")
+    }
+
     ///search_row_conflict_sets builds sets of memory addresses that are in the same rank/bank but
     ///in a different row. On real DRAM you should get RANK*BANK COUNT many conflict sets.
     /// This function may not terminate if the timing measurements are to noisy or the amount
@@ -79,7 +330,7 @@ impl DramAnalyzer {
     ///#Arguments
     ///* `set_count` amount of conflicting addresses sets to search for
     ///* `elems_per_set` require this many conflicting addresses in each set
-    fn search_row_conflict_sets(
+    pub fn search_row_conflict_sets(
         &mut self,
         set_count: usize,
         elems_per_set: usize,
@@ -177,8 +428,10 @@ mod test {
     use super::super::memory::MemoryBuffer;
     use super::super::MemoryTupleTimer;
     use crate::memory;
-    use crate::rank_bank::{evaluate_addr_function, parity};
+    use crate::memory::MemoryAddress;
+    use crate::rank_bank::{evaluate_addr_function, parity, DramAnalyzer};
     use nix::sys::mman::{MapFlags, ProtFlags};
+    use std::collections::HashSet;
 
     ///MockMemoryTimer evaluates the given rank_bank and row functions and only returns a high
     /// timing for same rank/bank but different row addresses. Useful for testing only.
@@ -332,5 +585,75 @@ mod test {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_remove_linear_dependent_masks() {
+        let input = vec![0x811, 0x422, 0xc33, 0x200];
+        //N.B. changing the order in input may change the result. Reduction should normally be from
+        //"left to right"
+        let want = vec![0x811, 0x422, 0x200];
+
+        let got = DramAnalyzer::remove_linear_dependent_masks(&input)
+            .expect("remove_linear_dependent_masks failed");
+
+        assert_eq!(
+            want, got,
+            "On input {:x?} we expect reduced maks {:x?} but got {:x?}",
+            input, want, got
+        );
+    }
+
+    #[test]
+    fn test_compute_rank_bank_function_candidates_minimal_example() {
+        let max_function_bits = 1;
+        let msb_index_for_function = 1;
+        let ignore_first_bits = 0;
+
+        let bank_0_samples = HashSet::from([
+            MemoryAddress {
+                phys: 0x0,
+                virt: 0x0,
+                ptr: std::ptr::null_mut(),
+            },
+            MemoryAddress {
+                phys: 0x1,
+                virt: 0x1,
+                ptr: std::ptr::null_mut(),
+            },
+        ]);
+        let bank_1_samples = HashSet::from([
+            MemoryAddress {
+                phys: 0x2,
+                virt: 0x2,
+                ptr: std::ptr::null_mut(),
+            },
+            MemoryAddress {
+                phys: 0x3,
+                virt: 0x3,
+                ptr: std::ptr::null_mut(),
+            },
+        ]);
+        //the function search space configured above leaves us with 0x1 and 0x2 as function masks
+        //in the input above the first set contains 0x0 and 0x1, thus the mask 0x1 cannot be right
+        //the second set also has one entry with bit index 0 set and one with bit index zero unset.
+        //For the second bit however, the entries are homogenous. Thus this is a valid mask
+        let want_rank_bank_function = vec![0x2];
+
+        let input_sets = vec![bank_0_samples, bank_1_samples];
+
+        let got_rank_bank_candidates = super::DramAnalyzer::compute_rank_bank_function_candidates(
+            &input_sets,
+            max_function_bits,
+            msb_index_for_function,
+            ignore_first_bits,
+        )
+        .expect("compute_rank_bank_function_candidates failed");
+
+        assert_eq!(
+            got_rank_bank_candidates, want_rank_bank_function,
+            "Unexpected rank_bank function wanted {:x?} got {:x?},",
+            want_rank_bank_function, got_rank_bank_candidates,
+        )
     }
 }
