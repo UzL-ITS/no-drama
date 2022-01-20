@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
-use no_drama::memory;
+use no_drama::memory::LinuxPageMap;
+use no_drama::{memory, DefaultMemoryTupleTimer, MemoryTupleTimer};
 use std::path::PathBuf;
 
 ///Program to sample the access time between random addresses from DRAM (i.e. the program
@@ -56,10 +57,14 @@ fn main() -> Result<(), anyhow::Error> {
             | MapFlags::MAP_POPULATE;
     }
 
+    let virt_to_phys =
+        Box::new(LinuxPageMap::new().with_context(|| "failed to instantiate virt_to_phys mapper")?);
+
     let mut buf = memory::MemoryBuffer::new(
         args.buffer_size_in_mb * 1024 * 1024,
         ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
         alloc_flags,
+        virt_to_phys,
     )
     .with_context(|| "Failed to create buffer")?;
 
@@ -67,6 +72,7 @@ fn main() -> Result<(), anyhow::Error> {
     address pairs, measure the ram access time on back to back access and store the
     results in one csv file per series*/
 
+    let timer = DefaultMemoryTupleTimer {};
     for series_index in 0..args.measure_series_count {
         //get (distinct) random offsets in buf and split after first half to build tuples of random
         //offsets that where both entries are distinct from each other
@@ -76,19 +82,21 @@ fn main() -> Result<(), anyhow::Error> {
         let mut access_times = Vec::new();
         for (off1, off2) in offsets1.iter().zip(offsets2) {
             unsafe {
-                access_times.push(no_drama::time_subsequent_access_from_ram(
-                    buf.offset(*off1)
-                        .with_context(|| {
-                            format!("failed to get offset {} from memory buffer", off1)
-                        })?
-                        .ptr,
-                    buf.offset(*off2)
-                        .with_context(|| {
-                            format!("failed to get offset {} from memory buffer", off2)
-                        })?
-                        .ptr,
-                    args.rounds_per_measurement,
-                ));
+                access_times.push(
+                    timer.time_subsequent_access_from_ram(
+                        buf.offset(*off1)
+                            .with_context(|| {
+                                format!("failed to get offset {} from memory buffer", off1)
+                            })?
+                            .ptr,
+                        buf.offset(*off2)
+                            .with_context(|| {
+                                format!("failed to get offset {} from memory buffer", off2)
+                            })?
+                            .ptr,
+                        args.rounds_per_measurement,
+                    ),
+                );
             }
         }
 
