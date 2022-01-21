@@ -16,12 +16,11 @@ const fn parity(value: u64) -> u64 {
 
     0b1 & y
 }
-
 ///evaluate_addr_function evaluates the specified XOR function and returns the result bitwise
 /// #Arguments
 /// * `masks`  vector with one mask for each bit of the function. The mask selects the bits that should get XORed
 /// for that specific function bit
-/// * `value` value on which the function should be evaluated
+/// * `physical_address` address on which the function should be evaluated
 ///
 /// #Example
 /// ```
@@ -29,8 +28,8 @@ const fn parity(value: u64) -> u64 {
 /// let value :u64 = 0x5;
 /// ```
 /// returns `[1,0,1]`
-pub fn evaluate_addr_function(masks: &Vec<u64>, value: u64) -> Vec<u64> {
-    masks.iter().map(|m| parity(value & m)).collect()
+pub fn evaluate_addr_function(masks: &Vec<u64>, physical_address: u64) -> Vec<u64> {
+    masks.iter().map(|m| parity(physical_address & m)).collect()
 }
 
 ///all_sets_filled returns true if we have at least the specified number of sets and each set contains
@@ -147,9 +146,95 @@ pub struct DramAnalyzer {
     measure_rounds: usize,
     /// timing threshold for same rank/bank but different row
     conflict_threshold: u64,
+    ///timing threshold for no row conflict. Can be equal to `conflict_threshold`. Setting it to
+    /// a slightly lower value might prevent errors due to noisy measurements
+    no_conflict_threshold: u64,
 }
 
 impl DramAnalyzer {
+    pub fn compute_row_masks_drama(
+        same_rank_bank_row_sets: &Vec<HashSet<MemoryAddress>>,
+        rank_bank_function: &Vec<u64>,
+    ) -> Result<Vec<u64>> {
+        let mut row_function_candidates =
+            DramAnalyzer::brute_force_matching_functions(same_rank_bank_row_sets, 16, 40 - 16, 6)?;
+
+        for rank_bank_mask in rank_bank_function.iter() {
+            let lsb = 1_u64 << (rank_bank_mask.trailing_zeros() + 1);
+            for row_mask in row_function_candidates.iter_mut() {
+                if *row_mask & lsb != 0 {
+                    *row_mask = (*row_mask) ^ (1_u64 << rank_bank_mask.trailing_zeros());
+                }
+            }
+        }
+
+        Ok(row_function_candidates)
+    }
+    /// Find addresses that are in the same rank+bank+row as the supplied addresses.
+    /// For rank+bank, we use the supplied address function. For same row we use timing
+    /// #Arguments
+    /// * `addresses` search for same rank+bank+row addresses for each element
+    /// * `rank_bank_function` reverse engineered address function for rank+bank.
+    /// * `elems_per_set` amount of same rank+bank+row addresses to search for each supplied address
+    pub fn search_same_bank_same_row_sets(
+        &mut self,
+        addresses: &Vec<MemoryAddress>,
+        rank_bank_function: &Vec<u64>,
+        elems_per_set: usize,
+    ) -> Result<Vec<HashSet<MemoryAddress>>> {
+        //alignment for the sampled addresses. Cache line bits should not influence the bank/rank functions
+        const ADDRESS_ALIGNMENT_IN_BYTES: usize = 64;
+
+        //stores the found sets
+        let mut same_bank_same_row: Vec<HashSet<MemoryAddress>> = Vec::new();
+        //used to check if we have already used an address
+        let mut used_physical_addrs: HashSet<u64> = HashSet::new();
+        addresses.iter().for_each(|e| {
+            used_physical_addrs.insert(e.phys);
+        });
+
+        for base_addr in addresses.iter() {
+            //choose arbitrary address from set and search for addrs that are in same bank and row
+            let base_addr_rank_bank = evaluate_addr_function(rank_bank_function, base_addr.phys);
+
+            let mut same_as_base = HashSet::new();
+
+            while same_as_base.len() <= elems_per_set {
+                let candidate_addr = self
+                    .memory_source
+                    .get_random_address(ADDRESS_ALIGNMENT_IN_BYTES)
+                    .with_context(|| "failed to sample memory address")?;
+                //sample new addr if not in same bank than base_addr
+                if !evaluate_addr_function(rank_bank_function, candidate_addr.phys)
+                    .eq(&base_addr_rank_bank)
+                {
+                    continue;
+                }
+                if used_physical_addrs.contains(&candidate_addr.phys) {
+                    continue;
+                }
+                used_physical_addrs.insert(candidate_addr.phys);
+
+                //use timing to check if we are in same row
+                unsafe {
+                    let time = self.timer.time_subsequent_access_from_ram(
+                        base_addr.ptr,
+                        candidate_addr.ptr,
+                        self.measure_rounds,
+                    );
+                    if time > self.no_conflict_threshold {
+                        continue;
+                    }
+                }
+
+                same_as_base.insert(candidate_addr);
+            }
+            same_bank_same_row.push(same_as_base);
+        }
+
+        Ok(same_bank_same_row)
+    }
+
     /// Removes linear dependents masks from the input and returns results in a new vec
     ///
     ///Directly taken from trrespass drama code
@@ -220,27 +305,26 @@ impl DramAnalyzer {
     /// the set have the same value when ANDed with mask. Returns the number of entries that fail this test.
     ///
     /// #Arguments
-    /// * `row_conflict_sets` sets of address that have a row conflict (same rank+bank but different row)
-    /// * `rank_bank_function_candidate` candidate for a single bit of the rank bank function in bitmask form.
+    /// * `observations` sets of addresses. We validate if the given function matches these observations
+    /// * `rank_bank_function_candidate` candidate for a single bit of the searched function in bitmask form.
     ///
     /// We could also check all pairs inside a set, but a single representative should be fine
     /// The reasoning for this test is to find rank_bank address masks matching all the observations that we made
-    fn check_conflict_sets_against_function(
-        row_conflict_sets: &Vec<HashSet<MemoryAddress>>,
-        rank_bank_function_candidate: u64,
+    fn check_observations_against_function(
+        observations: &Vec<HashSet<MemoryAddress>>,
+        function_candidate: u64,
     ) -> Result<usize> {
         let mut counter_examples = 0;
-        for set in row_conflict_sets.iter() {
+        for set in observations.iter() {
             if set.len() == 0 {
                 bail!("found set with zero elements, this should never happen");
             }
             let set_representative = set.iter().take(1).collect::<Vec<&MemoryAddress>>()[0];
-            let set_representative_fn_value =
-                &parity(set_representative.phys & rank_bank_function_candidate);
+            let set_representative_fn_value = &parity(set_representative.phys & function_candidate);
             counter_examples += set
                 .iter()
                 .skip(1)
-                .map(|e| parity(e.phys & rank_bank_function_candidate))
+                .map(|e| parity(e.phys & function_candidate))
                 .filter(|v| v != set_representative_fn_value)
                 .count();
         }
@@ -248,21 +332,21 @@ impl DramAnalyzer {
         return Ok(counter_examples);
     }
 
-    /// Selects all functions from the configured search space that "explains" the conflict sets passed to this function
+    /// Selects all functions from the configured search space that "explains" the observations passed to this function
     /// (the functions are evaluated on the physical address).
     /// The result still contains linear dependent function masks
-    /// For the search space, we assume a XOR function. As we wan to "explain" the observations the function needs
+    /// For the search space, we assume a XOR function. As we want to "explain" the observations the function needs
     /// log2(row_conflict_sets.len()) bits. Each bit of the function may depend on at most `max_function_bits`
     /// which we will represent a AND bit mask. The MSB of each mask is restricted by `msb_index_for_function`.
     /// The first `ignore_low_bits` bits of each address are ignored
     ///
     /// #Arguments
-    /// *`row_conflict_sets` : sets of address that have a row conflict (same rank+bank but different row)
+    /// *`observations` : sets of addresses. We search for all functions that would group addresses like in this observation
     ///  * `max_function_bits` : max amount of bits for a single mask
     /// * `msb_index_for_function` highest bit (INDEX) of the physical address that is still considered/included in the masks
     /// * `ignore_low_bits` ignore this many low bits of the physical address
-    fn compute_rank_bank_function_candidates(
-        row_conflict_sets: &Vec<HashSet<MemoryAddress>>,
+    fn brute_force_matching_functions(
+        observations: &Vec<HashSet<MemoryAddress>>,
         max_function_bits: usize,
         msb_index_for_function: usize,
         ignore_low_bits: usize,
@@ -278,7 +362,7 @@ impl DramAnalyzer {
                 ignore_low_bits,
             ) {
                 let counter_examples =
-                    DramAnalyzer::check_conflict_sets_against_function(&row_conflict_sets, mask)
+                    DramAnalyzer::check_observations_against_function(&observations, mask)
                         .with_context(|| "failed to evaluate function on row conflict sets")?;
                 if counter_examples == 0 {
                     candidates.push(mask);
@@ -311,7 +395,7 @@ impl DramAnalyzer {
         msb_index_for_function: usize,
         ignore_low_bits: usize,
     ) -> Result<Vec<u64>> {
-        let function_candidates = DramAnalyzer::compute_rank_bank_function_candidates(
+        let function_candidates = DramAnalyzer::brute_force_matching_functions(
             row_conflict_sets,
             max_function_bits,
             msb_index_for_function,
@@ -495,6 +579,95 @@ mod test {
     }
 
     #[test]
+    fn test_search_same_bank_same_row_sets() {
+        const CONFLICT_THRESHOLD: u64 = 330;
+        const NO_CONFLICT_THRESHOLD: u64 = 330;
+
+        struct TestCase {
+            description: &'static str,
+            want_elems_per_set: usize,
+            rank_bank_function: Vec<u64>,
+            row_function: Vec<u64>,
+            //as we use a mock timing function, these don't need to be valid addrs
+            input_addrs: Vec<MemoryAddress>,
+        }
+
+        let test_cases = vec![TestCase {
+            description: "Simple, 1 bit rank_bank, 2 two bit row",
+            want_elems_per_set: 10,
+            rank_bank_function: vec![0x100],
+            row_function: vec![0x200],
+            input_addrs: vec![MemoryAddress {
+                phys: 0x100,
+                virt: 0x100,
+                ptr: std::ptr::null_mut(),
+            }],
+        }];
+
+        for test_case in test_cases.into_iter() {
+            //
+            // Setup test environment
+            //
+
+            //mock mapper just returns the virtual address as the physical
+            let mock_virt_to_phys = Box::new(memory::LinearMockMapper {});
+
+            //alloc real memory buffer but without hugepages
+            let memory_source = MemoryBuffer::new(
+                1024 * 1024 * 200,
+                ProtFlags::PROT_READ,
+                MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_POPULATE,
+                mock_virt_to_phys,
+            )
+            .expect("failed to init buffer for testing");
+            //Build mock timer that returns timings according to the given rank/bank and row function
+            let mock_timer = MockMemoryTimer {
+                conflict_threshold: CONFLICT_THRESHOLD,
+                emulated_rank_bank_function: test_case.rank_bank_function.clone(),
+                emulated_row_function: test_case.row_function.clone(),
+            };
+
+            //
+            // Test function
+            //
+            let mut config = super::DramAnalyzer {
+                measure_rounds: 1,
+                memory_source: Box::new(memory_source),
+                timer: Box::new(mock_timer),
+                conflict_threshold: CONFLICT_THRESHOLD,
+                no_conflict_threshold: CONFLICT_THRESHOLD,
+            };
+
+            let got_addrs = config
+                .search_same_bank_same_row_sets(
+                    &test_case.input_addrs,
+                    &test_case.rank_bank_function,
+                    test_case.want_elems_per_set,
+                )
+                .expect("unexpected error in search_same_bank_same_row_sets");
+
+            //Evaluate results
+            assert_eq!(
+                got_addrs.len(),
+                test_case.input_addrs.len(),
+                "Wanted results for all {} input addrs, only got results for {}",
+                test_case.input_addrs.len(),
+                got_addrs.len()
+            );
+            for (idx, set) in got_addrs.iter().enumerate() {
+                assert!(
+                    set.len() >= test_case.want_elems_per_set,
+                    "Test {} : Set {}, wanted at least {} elems, got only {}",
+                    test_case.description,
+                    idx,
+                    test_case.want_elems_per_set,
+                    set.len()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn find_two_sets() {
         const CONFLICT_THRESHOLD: u64 = 330;
 
@@ -555,6 +728,7 @@ mod test {
                 memory_source: Box::new(memory_source),
                 timer: Box::new(mock_timer),
                 conflict_threshold: CONFLICT_THRESHOLD,
+                no_conflict_threshold: CONFLICT_THRESHOLD,
             };
 
             //Check that we got the desired amount of groups
@@ -642,7 +816,7 @@ mod test {
 
         let input_sets = vec![bank_0_samples, bank_1_samples];
 
-        let got_rank_bank_candidates = super::DramAnalyzer::compute_rank_bank_function_candidates(
+        let got_rank_bank_candidates = super::DramAnalyzer::brute_force_matching_functions(
             &input_sets,
             max_function_bits,
             msb_index_for_function,
