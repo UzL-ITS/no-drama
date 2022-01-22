@@ -63,21 +63,29 @@ struct XBitPermutationIter {
     last_mask: u64,
     current_mask: u64,
     inited: bool,
+    shift: usize,
 }
 
 impl XBitPermutationIter {
-    ///msb is *NOT* index but logical counting (i.e. first is 1)
-    fn new(bit_count: usize, msb: usize, initial_shift: usize) -> XBitPermutationIter {
+    /// Create an iterator that returns all permutations with the given amount of bits, that
+    /// uses at most the specified MSB. Furthermore you can specify to shift the values such that a certain
+    /// amount of low bits is ignored. Thus the returned iterator has (`bit_count` out of (`msb`-`excluded_low_bits`) values)
+    /// #Arguments
+    /// * `bit_count` maximal amount of bits that may be set at once (`bit_count  out of n`)
+    /// * `msb` highest bit that may be set (logical counting, i.e. first bit has the number 1)
+    /// * `excluded_low_bits` exclude this many lsb bits
+    /// ```
+    fn new(bit_count: usize, msb: usize, excluded_low_bits: usize) -> XBitPermutationIter {
+        let msb = msb - excluded_low_bits;
+
         let first_mask = (1u64 << bit_count) - 1;
         let last_mask = first_mask << (msb - bit_count);
-
-        let first_mask = first_mask << initial_shift;
-        let last_mask = last_mask << initial_shift;
 
         XBitPermutationIter {
             current_mask: first_mask,
             last_mask,
             inited: false,
+            shift: excluded_low_bits,
         }
     }
 }
@@ -91,7 +99,7 @@ impl Iterator for XBitPermutationIter {
         }
         if !self.inited {
             self.inited = true;
-            return Some(self.current_mask);
+            return Some(self.current_mask << self.shift);
         }
 
         let t = self.current_mask | self.current_mask.wrapping_sub(1);
@@ -101,7 +109,7 @@ impl Iterator for XBitPermutationIter {
                 .overflowing_shr(self.current_mask.trailing_zeros() + 1))
             .0;
 
-        Some(self.current_mask)
+        Some(self.current_mask << self.shift)
     }
 }
 #[cfg(test)]
@@ -121,19 +129,10 @@ mod test_x_bit_permutation_iter {
 
     #[test]
     fn test_permutations_large() {
-        let bit_count = 3;
-        let msb = 10;
-        let perm_iter = XBitPermutationIter::new(bit_count, msb, 0);
-        //there should be "bit_count choose msb" many results
-        let want_result_count = 120;
-
-        let got_result_count = perm_iter.count();
-
-        assert_eq!(
-            want_result_count, got_result_count,
-            "Unexpected number of results, wanted {} got {}",
-            want_result_count, got_result_count
-        )
+        let perms = XBitPermutationIter::new(3, 8, 4);
+        let got: Vec<u64> = perms.collect();
+        let want = vec![0x70, 0xb0, 0xd0, 0xe0];
+        assert_eq!(got, want, "Got {:x?} want {:x?}", got, want);
     }
 }
 
