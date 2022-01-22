@@ -132,7 +132,7 @@ impl MemoryBuffer {
     /// #Arguments
     /// * `byte_offset` offset in bytes
     pub fn offset(&mut self, byte_offset: usize) -> Result<MemoryAddress, anyhow::Error> {
-        if byte_offset > self.size_in_bytes {
+        if byte_offset >= self.size_in_bytes {
             bail!(
                 format! {"out off bounds, requested offset {} >= {}",byte_offset,self.size_in_bytes}
             )
@@ -193,14 +193,14 @@ impl MemorySource for MemoryBuffer {
     /// #Arguments
     /// * `alignment` alignment of the returned address in bytes
     fn get_random_address(&mut self, alignment: usize) -> Result<MemoryAddress, anyhow::Error> {
-        if alignment == self.size_in_bytes {
+        if alignment >= self.size_in_bytes {
             bail!(format!(
                 "requested alignment {} is larger than buffer size {}",
                 alignment, self.size_in_bytes
             ))
         }
-        let last_valid_index = self.size_in_bytes / alignment;
-        let index = rand::thread_rng().gen_range(0..=last_valid_index);
+        let entry_count = self.size_in_bytes / alignment;
+        let index = rand::thread_rng().gen_range(0..entry_count);
         let off = index * alignment;
 
         return self.offset(off);
