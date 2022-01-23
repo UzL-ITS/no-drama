@@ -43,6 +43,22 @@ fn all_sets_filled(
     set_count: usize,
     elems_per_set: usize,
 ) -> bool {
+    //print status updates
+    console::Term::stderr()
+        .clear_last_lines(1)
+        .expect("clear line failed");
+    eprintln!(
+        "Progress : touched {} out of {} sets, {} addrs missing",
+        sets.len(),
+        set_count,
+        (set_count * elems_per_set)
+            - sets
+                .iter()
+                .take(set_count)
+                .map(|(_id, set)| std::cmp::min(elems_per_set, set.len()))
+                .sum::<usize>()
+    );
+
     //check if we found enough sets
     if sets.len() < set_count {
         return false;
@@ -192,6 +208,11 @@ impl DramAnalyzer {
             used_physical_addrs.insert(e.phys);
         });
 
+        let total_work = addresses.len() * elems_per_set;
+        let mut finished_work = 0;
+
+        eprintln!(""); //required for line clearing logic for progress printing
+
         for base_addr in addresses.iter() {
             //choose arbitrary address from set and search for addrs that are in same bank and row
             let base_addr_rank_bank = evaluate_addr_function(rank_bank_function, base_addr.phys);
@@ -227,6 +248,11 @@ impl DramAnalyzer {
                 }
 
                 same_as_base.insert(candidate_addr);
+                finished_work += 1;
+                console::Term::stderr()
+                    .clear_last_lines(1)
+                    .expect("clear line failed");
+                eprintln!("Found {} out of {} addresses", finished_work, total_work)
             }
             same_bank_same_row.push(same_as_base);
         }
@@ -352,6 +378,12 @@ impl DramAnalyzer {
     ) -> Result<Vec<u64>> {
         let mut candidates: Vec<u64> = Vec::new();
 
+        //compute "work steps" for progress indications
+        let total_work: usize = (1..=max_function_bits)
+            .map(|k| num_integer::binomial(msb_index_for_function + 1 - ignore_low_bits, k))
+            .sum();
+        let bar = indicatif::ProgressBar::new(total_work as u64);
+
         //iterate over functions with increasing bit complexity
         for current_max_bits in 1..=max_function_bits {
             //iterate over permutations with current_max_bits set (lower than  msb_index_for_function)
@@ -360,6 +392,7 @@ impl DramAnalyzer {
                 msb_index_for_function + 1,
                 ignore_low_bits,
             ) {
+                bar.inc(1);
                 let counter_examples =
                     DramAnalyzer::check_observations_against_function(&observations, mask)
                         .with_context(|| "failed to evaluate function on row conflict sets")?;
@@ -431,6 +464,8 @@ impl DramAnalyzer {
         //way we can manage them in a HashSet
         let mut set_id_counter = 0;
 
+        //required for progress printing terminal line clearing logic in all_sets_filled
+        eprintln!("");
         while !all_sets_filled(&sets, set_count, elems_per_set) {
             let new_addr = self
                 .memory_source

@@ -13,3 +13,6 @@ csv = "1.1.6"
 pagemap = "0.1.0"
 clap = { version = "3.0.10", features = ["derive"] }
 anyhow = "1.0.52"
+num-integer = "0.1.44"
+indicatif = "0.16.2"
+console = "0.15.0"
