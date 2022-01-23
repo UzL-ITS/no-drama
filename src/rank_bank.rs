@@ -167,17 +167,75 @@ pub struct DramAnalyzer {
 }
 
 impl DramAnalyzer {
+    pub fn new(
+        memory_source: Box<dyn super::memory::MemorySource>,
+        timer: Box<dyn super::MemoryTupleTimer>,
+        measure_rounds: usize,
+        conflict_threshold: u64,
+        no_conflict_threshold: u64,
+    ) -> DramAnalyzer {
+        DramAnalyzer {
+            memory_source,
+            timer,
+            measure_rounds,
+            conflict_threshold,
+            no_conflict_threshold,
+        }
+    }
+
+    pub fn compute_row_masks_flipping(
+        &self,
+        same_rank_bank_row_sets: &Vec<HashSet<MemoryAddress>>,
+        rank_bank_function: &Vec<u64>,
+    ) -> Result<Vec<u64>> {
+        let rank_bank_mask: u64 = match rank_bank_function
+            .iter()
+            .copied()
+            .reduce(|accum, value| accum | value)
+        {
+            None => bail!("rank_bank_mask is empty!"),
+            Some(v) => v,
+        };
+        eprintln!("RankBank mask is 0x{:x}", rank_bank_mask);
+        let base_addr = same_rank_bank_row_sets[0]
+            .iter()
+            .take(1)
+            .collect::<Vec<&MemoryAddress>>()[0];
+        let mut row_mask: u64 = 0;
+        for bit_idx in 0..=29 {
+            let flip_mask = 1_u64 << bit_idx;
+
+            if (rank_bank_mask & flip_mask) != 0 {
+                continue;
+            }
+
+            unsafe {
+                let ptr_with_flip = (base_addr.virt ^ flip_mask) as *const u8;
+                let time = self.timer.time_subsequent_access_from_ram(
+                    base_addr.ptr,
+                    ptr_with_flip,
+                    self.measure_rounds,
+                );
+                if time > self.conflict_threshold {
+                    row_mask |= flip_mask;
+                }
+            }
+        }
+
+        Ok(vec![row_mask])
+    }
+
     pub fn compute_row_masks_drama(
         same_rank_bank_row_sets: &Vec<HashSet<MemoryAddress>>,
         rank_bank_function: &Vec<u64>,
     ) -> Result<Vec<u64>> {
         let mut row_function_candidates =
-            DramAnalyzer::brute_force_matching_functions(same_rank_bank_row_sets, 16, 40 - 16, 6)?;
+            DramAnalyzer::brute_force_matching_functions(same_rank_bank_row_sets, 10, 16, 30, 6)?;
 
         for rank_bank_mask in rank_bank_function.iter() {
             let lsb = 1_u64 << (rank_bank_mask.trailing_zeros() + 1);
             for row_mask in row_function_candidates.iter_mut() {
-                if *row_mask & lsb != 0 {
+                if (*row_mask & lsb) != 0 {
                     *row_mask = (*row_mask) ^ (1_u64 << rank_bank_mask.trailing_zeros());
                 }
             }
@@ -197,7 +255,9 @@ impl DramAnalyzer {
         rank_bank_function: &Vec<u64>,
         elems_per_set: usize,
     ) -> Result<Vec<HashSet<MemoryAddress>>> {
-        //alignment for the sampled addresses. Cache line bits should not influence the bank/rank functions
+        //alignment for the sampled addresses. Cache line bits should not influence the row function
+        //For performance optimization, we might increase this to 4096 as usually all addrs wihting
+        //a page are in the same row
         const ADDRESS_ALIGNMENT_IN_BYTES: usize = 64;
 
         //stores the found sets
@@ -214,7 +274,6 @@ impl DramAnalyzer {
         eprintln!(""); //required for line clearing logic for progress printing
 
         for base_addr in addresses.iter() {
-            //choose arbitrary address from set and search for addrs that are in same bank and row
             let base_addr_rank_bank = evaluate_addr_function(rank_bank_function, base_addr.phys);
 
             let mut same_as_base = HashSet::new();
@@ -372,6 +431,7 @@ impl DramAnalyzer {
     /// * `ignore_low_bits` ignore this many low bits of the physical address
     fn brute_force_matching_functions(
         observations: &Vec<HashSet<MemoryAddress>>,
+        min_function_bits: usize,
         max_function_bits: usize,
         msb_index_for_function: usize,
         ignore_low_bits: usize,
@@ -385,7 +445,7 @@ impl DramAnalyzer {
         let bar = indicatif::ProgressBar::new(total_work as u64);
 
         //iterate over functions with increasing bit complexity
-        for current_max_bits in 1..=max_function_bits {
+        for current_max_bits in min_function_bits..=max_function_bits {
             //iterate over permutations with current_max_bits set (lower than  msb_index_for_function)
             for mask in XBitPermutationIter::new(
                 current_max_bits,
@@ -429,6 +489,7 @@ impl DramAnalyzer {
     ) -> Result<Vec<u64>> {
         let function_candidates = DramAnalyzer::brute_force_matching_functions(
             row_conflict_sets,
+            1,
             max_function_bits,
             msb_index_for_function,
             ignore_low_bits,
@@ -615,7 +676,7 @@ mod test {
     #[test]
     fn test_search_same_bank_same_row_sets() {
         const CONFLICT_THRESHOLD: u64 = 330;
-        const NO_CONFLICT_THRESHOLD: u64 = 330;
+        const _NO_CONFLICT_THRESHOLD: u64 = 330;
 
         struct TestCase {
             description: &'static str,
@@ -852,6 +913,7 @@ mod test {
 
         let got_rank_bank_candidates = super::DramAnalyzer::brute_force_matching_functions(
             &input_sets,
+            1,
             max_function_bits,
             msb_index_for_function,
             ignore_first_bits,

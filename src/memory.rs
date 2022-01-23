@@ -91,7 +91,7 @@ pub struct MemoryBuffer {
 
 ///MemoryAddress bundles the virtual and physical address of a memory location, toghether
 /// with a pointer to said memory location
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub struct MemoryAddress {
     pub virt: u64,
     pub phys: u64,

@@ -16,3 +16,5 @@ anyhow = "1.0.52"
 num-integer = "0.1.44"
 indicatif = "0.16.2"
 console = "0.15.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.8"
