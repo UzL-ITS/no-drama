@@ -219,7 +219,7 @@ impl DramAnalyzer {
 
             let mut same_as_base = HashSet::new();
 
-            while same_as_base.len() <= elems_per_set {
+            while same_as_base.len() < elems_per_set {
                 let candidate_addr = self
                     .memory_source
                     .get_random_address(ADDRESS_ALIGNMENT_IN_BYTES)
