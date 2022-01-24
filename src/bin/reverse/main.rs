@@ -107,7 +107,6 @@ fn main() -> Result<()> {
         alloc_flags = MapFlags::MAP_PRIVATE
             | MapFlags::MAP_ANONYMOUS
             | MapFlags::MAP_HUGETLB
-            | MapFlags::MAP_FIXED
             | MapFlags::MAP_POPULATE;
     }
 
