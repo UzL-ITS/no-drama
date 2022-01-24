@@ -19,11 +19,11 @@ struct CliArgs {
     set_count: usize,
 
     ///Controls how many elements are sampled per set. A higher value gives higher guarantees that the reverse functions are correct for all memory locations
-    #[clap(short, long, default_value = "40")]
+    #[clap(long, default_value = "40")]
     elements_per_rank_bank_set: usize,
 
     ///Controls how many elements are sampled per set. A higher value gives higher guarantees that the reverse functions are correct for all memory locations
-    #[clap(short, long, default_value = "10")]
+    #[clap(long, default_value = "10")]
     elements_per_same_row_set: usize,
 
     ///Max amount of physical address bits a rank+bank function bit may depend on  
