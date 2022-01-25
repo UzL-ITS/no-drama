@@ -166,13 +166,20 @@ impl MemoryBuffer {
         alignment: usize,
         count: usize,
     ) -> Result<Vec<usize>, anyhow::Error> {
-        if alignment == self.size_in_bytes {
+        if alignment >= self.size_in_bytes {
             bail!(format!(
                 "requested alignment {} is larger than buffer size {}",
                 alignment, self.size_in_bytes
             ))
         }
-        let last_valid_index = self.size_in_bytes / alignment;
+        let last_valid_index = (self.size_in_bytes / alignment) - 1;
+        if count > (last_valid_index + 1) {
+            bail!(format!(
+                "requested {} unique indices but there are only {} elements",
+                count,
+                last_valid_index + 1
+            ))
+        }
 
         Ok(
             rand::seq::index::sample(&mut rand::thread_rng(), last_valid_index + 1, count)

@@ -116,17 +116,20 @@ fn main() -> Result<()> {
     // Program Logic
     //
 
-    //sample offsets ins buf for test
+    //sample offsets from buf for test
     let entry_count = buf.size_in_bytes() / args.alignment;
     let mut covered_entries =
         ((entry_count as f64) * (args.coverage_in_percent as f64 / 100.0)) as usize;
-    if (covered_entries % 2) != 0 {
-        covered_entries += 1;
+    if covered_entries == 1 || covered_entries == 0 {
+        bail!("alignment {:x} combined with coverage {} leads to 0 entries assuming an event entry count, ",args.alignment,args.coverage_in_percent);
     }
-    let random_offsets = buf
+    if (covered_entries % 2) != 0 {
+        covered_entries -= 1;
+    }
+    let random_indices = buf
         .get_random_offsets(args.alignment, covered_entries)
         .with_context(|| "failed to sample random offsets")?;
-    let (offsets1, offsets2) = random_offsets.split_at(covered_entries / 2);
+    let (offsets1, offsets2) = random_indices.split_at(covered_entries / 2);
 
     //setup progress printing
     let total_work = (covered_entries / 2) as f64;
