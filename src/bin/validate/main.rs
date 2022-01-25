@@ -142,10 +142,10 @@ fn main() -> Result<()> {
     for (off1, off2) in offsets1.iter().zip(offsets2.iter()) {
         let off_1_addr = buf
             .offset(*off1)
-            .with_context(|| format!("failed to get offset {} from memory buffer", off1))?;
+            .with_context(|| format!("failed to get offset {:x} from memory buffer", off1))?;
         let off_2_addr = buf
             .offset(*off2)
-            .with_context(|| format!("failed to get offset {} from memory buffer", off2))?;
+            .with_context(|| format!("failed to get offset {:x} from memory buffer", off2))?;
 
         let off1_rank_bank =
             rank_bank::evaluate_addr_function(&dram_fns.rank_bank_function, off_1_addr.phys);

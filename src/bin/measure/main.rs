@@ -86,12 +86,12 @@ fn main() -> Result<(), anyhow::Error> {
                     timer.time_subsequent_access_from_ram(
                         buf.offset(*off1)
                             .with_context(|| {
-                                format!("failed to get offset {} from memory buffer", off1)
+                                format!("failed to get offset {:x} from memory buffer", off1)
                             })?
                             .ptr,
                         buf.offset(*off2)
                             .with_context(|| {
-                                format!("failed to get offset {} from memory buffer", off2)
+                                format!("failed to get offset {:x} from memory buffer", off2)
                             })?
                             .ptr,
                         args.rounds_per_measurement,

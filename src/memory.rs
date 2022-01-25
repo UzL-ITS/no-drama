@@ -134,7 +134,7 @@ impl MemoryBuffer {
     pub fn offset(&mut self, byte_offset: usize) -> Result<MemoryAddress, anyhow::Error> {
         if byte_offset >= self.size_in_bytes {
             bail!(
-                format! {"out off bounds, requested offset {} >= {}",byte_offset,self.size_in_bytes}
+                format! {"out off bounds, requested offset {:x} >= {:x}",byte_offset,self.size_in_bytes}
             )
         }
         let ptr_to_start;
