@@ -1,10 +1,12 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
+use no_drama::memory::MemorySource;
 use no_drama::memory::{LinuxPageMap, MemoryAddress};
 use no_drama::rank_bank::DramAnalyzer;
-use no_drama::{memory, DefaultMemoryTupleTimer};
+use no_drama::{construct_timer_from_cli_arg, memory, DefaultMemoryTupleTimer};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs::File;
 
 #[derive(Parser, Debug, Serialize)]
@@ -67,6 +69,10 @@ struct CliArgs {
     ///If set, the memory buffer from which addresses are samples won't be backed by hugepages
     #[clap(long)]
     dont_use_hugepages: bool,
+
+    ///Select timer to time ram accesses.
+    #[clap(long, default_value = "rdtsc")]
+    timing_source: String,
 }
 
 impl CliArgs {
@@ -89,7 +95,7 @@ struct DRAMAddressing {
 }
 
 fn main() -> Result<()> {
-    let args = CliArgs::parse();
+    let args: CliArgs = CliArgs::parse();
 
     if let Err(e) = args.validate() {
         eprintln!("Invalid Config!");
@@ -113,7 +119,7 @@ fn main() -> Result<()> {
     let virt_to_phys =
         Box::new(LinuxPageMap::new().with_context(|| "failed to instantiate virt_to_phys mapper")?);
 
-    let buf = Box::new(
+    let mut buf = Box::new(
         memory::MemoryBuffer::new(
             args.buffer_size_in_mb * 1024 * 1024,
             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
@@ -123,7 +129,9 @@ fn main() -> Result<()> {
         .with_context(|| "Failed to create buffer")?,
     );
 
-    let timer = Box::new(DefaultMemoryTupleTimer {});
+    let timer = construct_timer_from_cli_arg(&args.timing_source)
+        .with_context(|| "failed to contruct timer")?;
+    let _base_addr1 = buf.get_random_address(8192)?;
 
     let mut analyzer = DramAnalyzer::new(
         buf,

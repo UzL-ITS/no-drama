@@ -1,4 +1,5 @@
-use super::memory::MemoryAddress;
+use super::memory::{MemoryAddress, MemoryBuffer, MemorySource};
+use crate::MemoryTupleTimer;
 use anyhow::{bail, Context, Result};
 use std::collections::hash_set::HashSet;
 use std::collections::HashMap;
@@ -152,6 +153,94 @@ mod test_x_bit_permutation_iter {
     }
 }
 
+///Get a address for each row using the given alignment (only considering max_bit bits of the row address) in a single bank.
+/// The bank is selected at random. DOES NOT CHECK IF WE HAVE AN ACTUAL ROW CONFLICT. This function only
+/// uses the given input args to find addrs that should have a row conflict. It does not do any validation
+/// #Arguments
+/// * `max_bit` NO index, i.e. first bit is 1 and so on.
+///
+pub fn get_all_rows_in_bank_upto_bit_x_by_mask(
+    memory_source: &mut MemoryBuffer,
+    rank_bank_function: &Vec<u64>,
+    max_bit: usize,
+    row_mask: u64,
+    alignment: usize,
+) -> Result<Vec<MemoryAddress>> {
+    //select an address from a random set as our base value
+    let base_addr = memory_source.get_random_address(alignment)?;
+    let base_bank_addr = evaluate_addr_function(&rank_bank_function, base_addr.phys);
+
+    //throw away all bits above `max_bit` in row mask
+    let row_mask = row_mask & ((1_u64 << max_bit) - 1);
+    eprintln!("Row mask after truncating high bits {:x}", row_mask);
+    //use number of remaining row bits, to calc number of rows that we should find if we only
+    //change address bits up to max_bit
+    let want_row_count = 2_usize.pow(row_mask.count_ones());
+
+    let mut found_row_mask_values = HashSet::new();
+    found_row_mask_values.insert(base_addr.phys & row_mask);
+
+    let mut found_rows = Vec::new();
+    found_rows.push(base_addr);
+
+    let entry_count = memory_source.size_in_bytes() / alignment;
+    eprintln!(
+        "Iterating over {} entries with alignment {}",
+        entry_count, alignment
+    );
+    eprintln!(
+        "(Assuming Hugeapges): smallest paddr 0x{:x} ,largest paddr 0x{:x}",
+        memory_source.offset(0)?.phys,
+        memory_source.offset((entry_count - 1) * alignment)?.phys
+    );
+
+    //this needs to be last print to stderr before loop entry. Otherwise progress printing eats up lines
+    eprintln!(
+        "Found {} out of {} addresses",
+        found_rows.len(),
+        want_row_count
+    );
+    for index in 0..entry_count {
+        let offset = index * alignment;
+        let candidate = memory_source.offset(offset)?;
+
+        //candidate must be in same bank as base_addr
+        let candidate_bank_addr = evaluate_addr_function(&rank_bank_function, candidate.phys);
+        if !base_bank_addr.eq(&candidate_bank_addr) {
+            continue;
+        }
+
+        //skip candidate if we already have an address for that row mask value
+        let candidate_row_mask_value = candidate.phys & row_mask;
+        if found_row_mask_values.contains(&candidate_row_mask_value) {
+            continue;
+        }
+
+        //if we come here, we are in the same bank and did not yet see the row mask value
+        found_row_mask_values.insert(candidate_row_mask_value);
+        found_rows.push(candidate);
+
+        console::Term::stderr()
+            .clear_last_lines(1)
+            .expect("clear line failed");
+        eprintln!(
+            "Found {} out of {} addresses",
+            found_row_mask_values.len(),
+            want_row_count,
+        )
+    }
+
+    if found_rows.len() < want_row_count {
+        bail!(format!(
+            "Wanted {} rows but got only {}",
+            want_row_count,
+            found_rows.len()
+        ));
+    }
+
+    Ok(found_rows)
+}
+
 ///DramAnalyzer allows to reverse engineer the rank/bank and row mapping of DRAM memory
 /// based on the timing side channel presented in the DRAMA paper
 pub struct DramAnalyzer {
@@ -183,6 +272,130 @@ impl DramAnalyzer {
         }
     }
 
+    pub fn get_all_rows_in_bank_by_timing(
+        &mut self,
+        base_addr: &MemoryAddress,
+        alignment: usize,
+    ) -> Result<Vec<MemoryAddress>> {
+        let mut found_rows = Vec::new();
+        found_rows.push(base_addr.clone());
+
+        let entry_count = self.memory_source.size_in_bytes() / alignment;
+        eprintln!(
+            "Iterating over {} entries with alignment {}",
+            entry_count, alignment
+        );
+        eprintln!("Found {} rows", found_rows.len(),);
+        for index in 0..entry_count {
+            let offset = index * alignment;
+            let candidate = self.memory_source.offset(offset)?;
+
+            let timing;
+            unsafe {
+                timing = self.timer.time_subsequent_access_from_ram(
+                    base_addr.ptr.clone(),
+                    candidate.ptr,
+                    self.measure_rounds,
+                );
+            }
+
+            if timing > self.conflict_threshold {
+                found_rows.push(candidate);
+            }
+
+            console::Term::stderr()
+                .clear_last_lines(1)
+                .expect("clear line failed");
+            eprintln!("Found {} rows", found_rows.len())
+        }
+        Ok(found_rows)
+    }
+
+    pub fn latency_xiao_general(&mut self, flip_mask: &u64) -> Result<bool> {
+        let mut addrs = Vec::new();
+        const SAMPLE_SIZE: usize = 400;
+
+        while addrs.len() < SAMPLE_SIZE {
+            let candidate = self
+                .memory_source
+                .get_random_address(64)
+                .with_context(|| "get_random_address failed ")?;
+            if (candidate.phys & flip_mask) == 0 {
+                addrs.push(candidate);
+            }
+        }
+
+        //measure timing between each addr in addrs against addr with bits from flip_mask flipped
+        let mut high_access_time_count = 0;
+        for addr in addrs.iter() {
+            let base_ptr = addr.ptr;
+            //only works if we are in hugepage in idx_for_flip < 29
+            let flipped = ((base_ptr as u64) ^ flip_mask) as *const u8;
+            unsafe {
+                let time = self.timer.time_subsequent_access_from_ram(
+                    base_ptr,
+                    flipped,
+                    self.measure_rounds,
+                );
+                if time > self.conflict_threshold {
+                    high_access_time_count += 1;
+                }
+            }
+        }
+
+        //return true if high access times are in majority
+        return Ok(high_access_time_count > (addrs.len() / 2));
+    }
+
+    pub fn latency_xiao(&mut self, idx_for_flip: u64) -> Result<bool> {
+        //sample 100 addrs
+        let mut addrs = Vec::new();
+        for _i in 0..100 {
+            addrs.push(
+                self.memory_source
+                    .get_random_address(64)
+                    .with_context(|| "get_random_address failed ")?,
+            );
+        }
+
+        //measure timing between each addr in addrs against addr with bit at idx_for_flip flipped
+        //increase high_access_time_count if access time was high
+        let flip_mask = 1_u64 << idx_for_flip;
+        let mut high_access_time_count = 0;
+        for addr in addrs.iter() {
+            let base_ptr = addr.ptr;
+            //only works if we are in hugepage in idx_for_flip < 29
+            let flipped = ((base_ptr as u64) ^ flip_mask) as *const u8;
+            unsafe {
+                let time = self.timer.time_subsequent_access_from_ram(
+                    base_ptr,
+                    flipped,
+                    self.measure_rounds,
+                );
+                if time > self.conflict_threshold {
+                    high_access_time_count += 1;
+                }
+            }
+        }
+
+        //return true if high access times are in majority
+        return Ok(high_access_time_count > (addrs.len() / 2));
+    }
+
+    pub fn compute_row_mask_xiao(&mut self) -> Result<u64> {
+        let mut row_mask: u64 = 0;
+        for bit_idx in 0..=29 {
+            if self
+                .latency_xiao(bit_idx)
+                .with_context(|| format!("latency_xia failed for bit_idx {}", bit_idx))?
+            {
+                row_mask |= 1_u64 << bit_idx;
+            }
+        }
+
+        Ok(row_mask)
+    }
+
     pub fn compute_row_masks_flipping(
         &self,
         same_rank_bank_row_sets: &Vec<HashSet<MemoryAddress>>,
@@ -205,9 +418,9 @@ impl DramAnalyzer {
         for bit_idx in 0..=29 {
             let flip_mask = 1_u64 << bit_idx;
 
-            if (rank_bank_mask & flip_mask) != 0 {
+            /*if (rank_bank_mask & flip_mask) != 0 {
                 continue;
-            }
+            }*/
 
             unsafe {
                 let ptr_with_flip = (base_addr.virt ^ flip_mask) as *const u8;
@@ -227,19 +440,19 @@ impl DramAnalyzer {
 
     pub fn compute_row_masks_drama(
         same_rank_bank_row_sets: &Vec<HashSet<MemoryAddress>>,
-        rank_bank_function: &Vec<u64>,
+        _rank_bank_function: &Vec<u64>,
     ) -> Result<Vec<u64>> {
-        let mut row_function_candidates =
-            DramAnalyzer::brute_force_matching_functions(same_rank_bank_row_sets, 10, 16, 30, 6)?;
+        let row_function_candidates =
+            DramAnalyzer::brute_force_matching_functions(same_rank_bank_row_sets, 12, 12, 30, 6)?;
 
-        for rank_bank_mask in rank_bank_function.iter() {
+        /*for rank_bank_mask in rank_bank_function.iter() {
             let lsb = 1_u64 << (rank_bank_mask.trailing_zeros() + 1);
             for row_mask in row_function_candidates.iter_mut() {
                 if (*row_mask & lsb) != 0 {
                     *row_mask = (*row_mask) ^ (1_u64 << rank_bank_mask.trailing_zeros());
                 }
             }
-        }
+        }*/
 
         Ok(row_function_candidates)
     }
@@ -547,10 +760,10 @@ impl DramAnalyzer {
             //time new_addr against sets
             let mut ids_with_conflict_timing: Vec<usize> = Vec::new();
             for (set_id, set) in sets.iter() {
-                if set.len() == 0 {
-                    bail!("found set with zero elements, this should never happen");
-                }
-                let addr = set.iter().take(1).collect::<Vec<&MemoryAddress>>()[0];
+                let addr = match set.iter().nth(0) {
+                    None => bail!("found set with zero elements, this should never happen"),
+                    Some(v) => v,
+                };
 
                 unsafe {
                     let timing = self.timer.time_subsequent_access_from_ram(
@@ -602,48 +815,47 @@ impl DramAnalyzer {
     }
 }
 
+///MockMemoryTimer evaluates the given rank_bank and row functions and only returns a high
+/// timing for same rank/bank but different row addresses. Useful for testing only.
+pub struct MockMemoryTimer {
+    conflict_threshold: u64,
+    emulated_rank_bank_function: Vec<u64>,
+    emulated_row_function: Vec<u64>,
+}
+
+impl MemoryTupleTimer for MockMemoryTimer {
+    unsafe fn time_subsequent_access_from_ram(
+        &self,
+        a: *const u8,
+        b: *const u8,
+        _rounds: usize,
+    ) -> u64 {
+        //evaluate emulated rank_bank addresses for bath input addresses
+        let rank_bank_addr_a = evaluate_addr_function(&self.emulated_rank_bank_function, a as u64);
+        let row_addr_a = evaluate_addr_function(&self.emulated_row_function, a as u64);
+
+        let rank_bank_addr_b = evaluate_addr_function(&self.emulated_rank_bank_function, b as u64);
+        let row_addr_b = evaluate_addr_function(&self.emulated_row_function, b as u64);
+
+        //if our emulated functions place the two addrs in same rank/bank but a different row return high timing, else low
+        return if rank_bank_addr_a.eq(&rank_bank_addr_b) && !row_addr_a.eq(&row_addr_b) {
+            self.conflict_threshold + 10
+        } else {
+            self.conflict_threshold - 50
+        };
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::super::memory::MemoryBuffer;
     use super::super::MemoryTupleTimer;
+    use super::MockMemoryTimer;
     use crate::memory;
     use crate::memory::MemoryAddress;
     use crate::rank_bank::{evaluate_addr_function, parity, DramAnalyzer};
     use nix::sys::mman::{MapFlags, ProtFlags};
     use std::collections::HashSet;
-
-    ///MockMemoryTimer evaluates the given rank_bank and row functions and only returns a high
-    /// timing for same rank/bank but different row addresses. Useful for testing only.
-    struct MockMemoryTimer {
-        conflict_threshold: u64,
-        emulated_rank_bank_function: Vec<u64>,
-        emulated_row_function: Vec<u64>,
-    }
-
-    impl MemoryTupleTimer for MockMemoryTimer {
-        unsafe fn time_subsequent_access_from_ram(
-            &self,
-            a: *const u8,
-            b: *const u8,
-            _rounds: usize,
-        ) -> u64 {
-            //evaluate emulated rank_bank addresses for bath input addresses
-            let rank_bank_addr_a =
-                evaluate_addr_function(&self.emulated_rank_bank_function, a as u64);
-            let row_addr_a = evaluate_addr_function(&self.emulated_row_function, a as u64);
-
-            let rank_bank_addr_b =
-                evaluate_addr_function(&self.emulated_rank_bank_function, b as u64);
-            let row_addr_b = evaluate_addr_function(&self.emulated_row_function, b as u64);
-
-            //if our emulated functions place the two addrs in same rank/bank but a different row return high timing, else low
-            return if rank_bank_addr_a.eq(&rank_bank_addr_b) && !row_addr_a.eq(&row_addr_b) {
-                self.conflict_threshold + 10
-            } else {
-                self.conflict_threshold - 50
-            };
-        }
-    }
 
     #[test]
     fn test_parity() {

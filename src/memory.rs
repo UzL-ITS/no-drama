@@ -6,6 +6,8 @@ use rand::Rng;
 
 pub trait MemorySource {
     fn get_random_address(&mut self, alignment: usize) -> Result<MemoryAddress, anyhow::Error>;
+    fn offset(&mut self, offset: usize) -> Result<MemoryAddress, anyhow::Error>;
+    fn size_in_bytes(&self) -> usize;
 }
 
 pub trait VirtToPhysResolver {
@@ -108,7 +110,7 @@ impl MemoryBuffer {
         size_in_bytes: usize,
         prot: ProtFlags,
         flags: MapFlags,
-        virt_to_phys: Box<dyn VirtToPhysResolver>,
+        mut virt_to_phys: Box<dyn VirtToPhysResolver>,
     ) -> Result<MemoryBuffer, anyhow::Error> {
         //allocate the memory
         let ptr: *mut c_void;
@@ -121,40 +123,20 @@ impl MemoryBuffer {
             anyhow::bail!("allocation failed");
         }
 
+        //make sure pages are faulted to memory
+        unsafe {
+            ptr.write_bytes(0, size_in_bytes);
+        }
+        let start_paddr = virt_to_phys
+            .get_phys(ptr as u64)
+            .with_context(|| "failed to resolve start vaddr 0x{:x} of the buffer to paddr")?;
+        eprintln!("Allocated mem buf starting at paddr 0x{:x}", start_paddr);
+
         return Ok(MemoryBuffer {
             buf: ptr.cast(),
             size_in_bytes,
             virt_to_phys,
         });
-    }
-
-    ///offset returns of MemoryAddress struct for the given offset in the buffer
-    /// #Arguments
-    /// * `byte_offset` offset in bytes
-    pub fn offset(&mut self, byte_offset: usize) -> Result<MemoryAddress, anyhow::Error> {
-        if byte_offset >= self.size_in_bytes {
-            bail!(
-                format! {"out off bounds, requested offset {:x} >= {:x}",byte_offset,self.size_in_bytes}
-            )
-        }
-        let ptr_to_start;
-        unsafe {
-            ptr_to_start = self.buf.add(byte_offset);
-        }
-        //
-        //get phys address
-        //
-
-        let phys_addr = self
-            .virt_to_phys
-            .get_phys(ptr_to_start as u64)
-            .with_context(|| format!("failed to translate 0x{:x} to phys", ptr_to_start as u64))?;
-
-        Ok(MemoryAddress {
-            phys: phys_addr,
-            virt: ptr_to_start as u64,
-            ptr: ptr_to_start,
-        })
     }
 
     /// Returns distinct random offsets inside the buffer
@@ -188,14 +170,13 @@ impl MemoryBuffer {
                 .collect(),
         )
     }
-
-    ///size_in_bytes returns the size of the memory buffer in bytes
-    pub fn size_in_bytes(&self) -> usize {
-        self.size_in_bytes
-    }
 }
 
 impl MemorySource for MemoryBuffer {
+    ///size_in_bytes returns the size of the memory buffer in bytes
+    fn size_in_bytes(&self) -> usize {
+        self.size_in_bytes
+    }
     /// get_random_address returns a random address from the buffer with the given alignment
     /// #Arguments
     /// * `alignment` alignment of the returned address in bytes
@@ -211,6 +192,35 @@ impl MemorySource for MemoryBuffer {
         let off = index * alignment;
 
         return self.offset(off);
+    }
+
+    ///offset returns of MemoryAddress struct for the given offset in the buffer
+    /// #Arguments
+    /// * `byte_offset` offset in bytes
+    fn offset(&mut self, byte_offset: usize) -> Result<MemoryAddress, anyhow::Error> {
+        if byte_offset >= self.size_in_bytes {
+            bail!(
+                format! {"out off bounds, requested offset {:x} >= {:x}",byte_offset,self.size_in_bytes}
+            )
+        }
+        let ptr_to_start;
+        unsafe {
+            ptr_to_start = self.buf.add(byte_offset);
+        }
+        //
+        //get phys address
+        //
+
+        let phys_addr = self
+            .virt_to_phys
+            .get_phys(ptr_to_start as u64)
+            .with_context(|| format!("failed to translate 0x{:x} to phys", ptr_to_start as u64))?;
+
+        Ok(MemoryAddress {
+            phys: phys_addr,
+            virt: ptr_to_start as u64,
+            ptr: ptr_to_start,
+        })
     }
 }
 

@@ -2,7 +2,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
-use no_drama::{memory, DefaultMemoryTupleTimer, MemoryTupleTimer};
+use no_drama::memory::MemorySource;
+use no_drama::{
+    construct_timer_from_cli_arg, memory, CountingThreadTupleTimer, DefaultMemoryTupleTimer,
+    MemoryTupleTimer,
+};
 use std::path::PathBuf;
 
 ///Program to sample the access time between random addresses from DRAM (i.e. the program
@@ -38,12 +42,16 @@ struct CliArgs {
     ///If set, the buffer will not use hugepages for the backing buffer
     #[clap(long)]
     dont_use_hugepages: bool,
+
+    ///Select timer to time ram accesses.
+    #[clap(long, default_value = "rdtsc")]
+    timing_source: String,
 }
 
 fn main() -> Result<(), anyhow::Error> {
     //parse cli args
 
-    let args = CliArgs::parse();
+    let args: CliArgs = CliArgs::parse();
 
     //allocate memory buffer used for the measurements
 
@@ -72,7 +80,8 @@ fn main() -> Result<(), anyhow::Error> {
     address pairs, measure the ram access time on back to back access and store the
     results in one csv file per series*/
 
-    let timer = DefaultMemoryTupleTimer {};
+    let timer = construct_timer_from_cli_arg(&args.timing_source)
+        .with_context(|| "failed to contruct timer")?;
     for series_index in 0..args.measure_series_count {
         //get (distinct) random offsets in buf and split after first half to build tuples of random
         //offsets that where both entries are distinct from each other

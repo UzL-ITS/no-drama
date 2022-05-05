@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
+use no_drama::memory::MemorySource;
 use no_drama::{memory, rank_bank, DefaultMemoryTupleTimer, MemoryTupleTimer};
 use serde::Deserialize;
 use std::fs::File;
@@ -61,11 +62,11 @@ impl CliArgs {
 #[derive(Deserialize, Debug)]
 struct DRAMAddressing {
     rank_bank_function: Vec<u64>,
-    row_mask_candidates: Vec<u64>,
+    row_function: Vec<u64>,
 }
 
 fn main() -> Result<()> {
-    let args = CliArgs::parse();
+    let args: CliArgs = CliArgs::parse();
 
     if let Err(e) = args.validate() {
         eprintln!("Invalid Config!");
@@ -77,8 +78,8 @@ fn main() -> Result<()> {
     let dram_fns: DRAMAddressing =
         serde_yaml::from_reader(dram_fns).with_context(|| "failed to parse dram address config")?;
 
-    if dram_fns.row_mask_candidates.len() != 1 {
-        bail!("Currently only a single row mask is supported!");
+    if dram_fns.row_function.len() == 1 {
+        bail!("dram row function has only one element. Most likely you are using the wrong format");
     }
 
     eprintln!("Dram Config rank bank {:x?}", dram_fns);
@@ -100,20 +101,114 @@ fn main() -> Result<()> {
     let virt_to_phys =
         Box::new(LinuxPageMap::new().with_context(|| "failed to instantiate virt_to_phys mapper")?);
 
-    let mut buf = Box::new(
-        memory::MemoryBuffer::new(
-            args.buffer_size_in_mb * 1024 * 1024,
-            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-            alloc_flags,
-            virt_to_phys,
-        )
-        .with_context(|| "Failed to create buffer")?,
-    );
+    let mut buf = memory::MemoryBuffer::new(
+        args.buffer_size_in_mb * 1024 * 1024,
+        ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+        alloc_flags,
+        virt_to_phys,
+    )
+    .with_context(|| "Failed to create buffer")?;
 
     let timer = Box::new(DefaultMemoryTupleTimer {});
 
     //
     // Program Logic
+    //
+    /*
+       //
+       // Test 1: Rows inside one bank
+       //
+
+       //get one representative for each row in a single bank, only considering bank addressing bits
+       //up to max_bit argument
+       let mut rows_in_bank = get_all_rows_in_bank_upto_bit_x_by_mask(
+           &mut Box::new(&mut buf),
+           &dram_fns.rank_bank_function,
+           30,
+           dram_fns.row_mask_candidates[0],
+           args.alignment,
+       )?;
+
+       //check that first entry has row conflict with all other entries
+
+       rows_in_bank.sort_by_key(|v| v.phys & dram_fns.row_mask_candidates[0]);
+       let base = &rows_in_bank[0];
+       for other in rows_in_bank.iter().skip(1) {
+           let timing;
+           unsafe {
+               timing = timer.time_subsequent_access_from_ram(
+                   base.ptr,
+                   other.ptr,
+                   args.rounds_per_measurement,
+               );
+           }
+           assert_eq!(
+               evaluate_addr_function(&dram_fns.rank_bank_function, base.phys),
+               evaluate_addr_function(&dram_fns.rank_bank_function, other.phys)
+           );
+           assert_ne!(
+               base.phys & dram_fns.row_mask_candidates[0],
+               other.phys & dram_fns.row_mask_candidates[0]
+           );
+           /*eprintln!(
+               "{:x} {:x}, Banks {:x?} {:x?}, Rows {:08x} {:08x}, timing {}",
+               base.phys,
+               other.phys,
+               evaluate_addr_function(&dram_fns.rank_bank_function, base.phys),
+               evaluate_addr_function(&dram_fns.rank_bank_function, other.phys),
+               base.phys & dram_fns.row_mask_candidates[0],
+               other.phys & dram_fns.row_mask_candidates[0],
+               timing,
+           );*/
+           if timing < args.no_conflict_threshold {
+               eprintln!(
+                   "Expected conflict for {:x} and {:x} but not NO conflict timing {}",
+                   base.phys, other.phys, timing
+               );
+           }
+       }
+
+       /* //check that all of these entries give a row conflict
+       let total_work = binomial(rows_in_bank.len(), 2);
+       let mut finished_work = 0;
+       eprintln!("{} out of {}", finished_work, total_work);
+       let mut counterexamples = Vec::new();
+       for a in rows_in_bank.iter().combinations(2) {
+           let timing;
+           unsafe {
+               timing = timer.time_subsequent_access_from_ram(
+                   a[0].ptr,
+                   a[1].ptr,
+                   args.rounds_per_measurement,
+               );
+           }
+           if timing < args.conflict_threshold {
+               counterexamples.push((a[0].phys, a[1].phys, timing));
+           }
+           finished_work += 1;
+           console::Term::stderr()
+               .clear_last_lines(1)
+               .expect("clear line failed");
+           eprintln!(
+               "{} out of {} , {} counterexamples",
+               finished_work,
+               total_work,
+               counterexamples.len()
+           );
+       }
+       eprintln!("Counterexamples {:x?}", counterexamples);
+
+       */
+
+       eprintln!(
+           "Same set test is done! Got {} rows in total",
+           rows_in_bank.len()
+       );
+
+    */
+
+    //
+    // Test 2: Random offset pairs
     //
 
     //sample offsets from buf for test
@@ -126,10 +221,10 @@ fn main() -> Result<()> {
     if (covered_entries % 2) != 0 {
         covered_entries -= 1;
     }
-    let random_indices = buf
+    let random_offsets = buf
         .get_random_offsets(args.alignment, covered_entries)
         .with_context(|| "failed to sample random offsets")?;
-    let (offsets1, offsets2) = random_indices.split_at(covered_entries / 2);
+    let (offsets1, offsets2) = random_offsets.split_at(covered_entries / 2);
 
     //setup progress printing
     let total_work = (covered_entries / 2) as f64;
@@ -142,6 +237,7 @@ fn main() -> Result<()> {
 
     //main measure loop
     let mut counter_examples: Vec<(u64, u64, u64)> = Vec::new();
+    let mut row_conflict_counter = 0;
     for (off1, off2) in offsets1.iter().zip(offsets2.iter()) {
         let off_1_addr = buf
             .offset(*off1)
@@ -152,11 +248,11 @@ fn main() -> Result<()> {
 
         let off1_rank_bank =
             rank_bank::evaluate_addr_function(&dram_fns.rank_bank_function, off_1_addr.phys);
-        let off1_row = dram_fns.row_mask_candidates[0] & off_1_addr.phys;
+        let off1_row = rank_bank::evaluate_addr_function(&dram_fns.row_function, off_1_addr.phys);
 
         let off2_rank_bank =
             rank_bank::evaluate_addr_function(&dram_fns.rank_bank_function, off_2_addr.phys);
-        let off2_row = dram_fns.row_mask_candidates[0] & off_2_addr.phys;
+        let off2_row = rank_bank::evaluate_addr_function(&dram_fns.row_function, off_2_addr.phys);
 
         /*
         eprintln!(
@@ -169,7 +265,7 @@ fn main() -> Result<()> {
         );
          */
 
-        let mut time;
+        let time;
         unsafe {
             loop {
                 time = timer.time_subsequent_access_from_ram(
@@ -177,32 +273,36 @@ fn main() -> Result<()> {
                     off_2_addr.ptr,
                     args.rounds_per_measurement,
                 );
+                break;
                 //allows to sample until we get a "good" measurement
-                if (time > args.conflict_threshold) || (time < args.no_conflict_threshold) {
-                    break;
-                }
+                // if (time > args.conflict_threshold) || (time < args.no_conflict_threshold) {
+                //    break;
+                //}
             }
         }
 
         if time > args.conflict_threshold {
+            row_conflict_counter += 1;
             //if here, timing says row conflict, check that this matches with our addressing function
 
             //we cannot have a row conflict, if we are in different banks
             if !off1_rank_bank.eq(&off2_rank_bank) {
                 counter_examples.push((off_1_addr.phys, off_2_addr.phys, time));
-                println!("accessing 0x{:x} and 0x{:x} gives row conflict timing {} but our function says different banks!\n",
-                         off_1_addr.phys, off_2_addr.phys, time);
+                println!("accessing 0x{:x} and 0x{:x} (xor diff 0x{:09x}) gives row conflict timing {} but our function says different banks!\n",
+                         off_1_addr.phys, off_2_addr.phys,off_1_addr.phys ^ off_2_addr.phys ,  time);
             }
             //we are in the same bank
             //we cannot have a row conflict if we are in the same bank and in the same row
 
-            if off1_row == off2_row {
+            if off1_row.eq(&off2_row) {
                 counter_examples.push((off_1_addr.phys, off_2_addr.phys, time));
 
-                println!("accessing 0x{:x} and 0x{:x} gives row conflict timing {} but our function says same rank+bank+row!\n",
-                         off_1_addr.phys, off_2_addr.phys, time);
+                println!("accessing 0x{:x} and 0x{:x} (xor diff 0x{:09x}) gives row conflict timing {} but our function says same rank+bank+row!\n",
+                         off_1_addr.phys, off_2_addr.phys,off_1_addr.phys ^ off_2_addr.phys, time);
             }
-        } else if time < args.no_conflict_threshold {
+        }
+        /*
+        else if time < args.no_conflict_threshold {
             //if here, timing says no row conflict, check that this matches with our addressing function
             if (off1_rank_bank.eq(&off2_rank_bank)) && (off1_row == off2_row) {
                 counter_examples.push((off_1_addr.phys, off_2_addr.phys, time));
@@ -212,6 +312,7 @@ fn main() -> Result<()> {
         } else {
             panic!("Got measurement in between conflict and no conflict threshold although we filtered for this")
         }
+         */
 
         console::Term::stderr()
             .clear_last_lines(1)
@@ -220,10 +321,12 @@ fn main() -> Result<()> {
         eprintln!("Progress: {:.1}%", (finished_work / total_work) * 100.0);
     }
 
+    println!("Encountered {} row conflict accesses", row_conflict_counter);
     println!("Done!\nCounterexamples are : {:x?}", counter_examples);
     println!(
         "This is equal to {:.4}% of accesses",
         ((counter_examples.len() as f64) / total_work) * 100.0
     );
+
     Ok(())
 }
