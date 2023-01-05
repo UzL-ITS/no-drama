@@ -1,15 +1,18 @@
 pub mod memory;
 pub mod rank_bank;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
-use clap::arg;
-use core::ptr;
-use std::arch::asm;
 use std::string::String;
-use std::{sync, thread, time};
 
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64;
+#[cfg(target_arch = "x86_64")]
+use {
+    anyhow::Context,
+    core::arch::x86_64,
+    core::ptr,
+    std::arch::asm,
+    std::{sync, thread, time},
+};
 
 pub trait MemoryTimer {
     unsafe fn time_access(&self, a: *const u8) -> u64;
@@ -213,7 +216,7 @@ impl CountingThreadTupleTimer {
 
         let v = counter.clone();
         let vv = thread_should_terminate.clone();
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             core_affinity::set_for_current(core_affinity::CoreId {
                 id: core_id_counter,
             });

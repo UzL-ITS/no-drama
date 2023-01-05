@@ -2,9 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory;
-use no_drama::memory::{
-    LinuxPageMap, MemoryAddress, MemoryBuffer, MemorySource, VirtToPhysResolver,
-};
+use no_drama::memory::{LinuxPageMap, MemoryAddress, MemoryBuffer, MemorySource};
 use no_drama::MemoryTupleTimer;
 use rand::{Rng, SeedableRng};
 
@@ -161,7 +159,7 @@ fn main() -> Result<()> {
             | MapFlags::MAP_POPULATE;
     }
 
-    let mut virt_to_phys =
+    let virt_to_phys =
         LinuxPageMap::new().with_context(|| "failed to instantiate virt_to_phys mapper")?;
 
     let buf = memory::MemoryBuffer::new(

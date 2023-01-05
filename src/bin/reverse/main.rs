@@ -4,9 +4,8 @@ use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::MemorySource;
 use no_drama::memory::{LinuxPageMap, MemoryAddress};
 use no_drama::rank_bank::DramAnalyzer;
-use no_drama::{construct_timer_from_cli_arg, memory, DefaultMemoryTupleTimer};
+use no_drama::{construct_timer_from_cli_arg, memory};
 use serde::Serialize;
-use std::collections::HashSet;
 use std::fs::File;
 
 #[derive(Parser, Debug, Serialize)]

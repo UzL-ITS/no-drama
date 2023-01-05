@@ -3,7 +3,7 @@ use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
 use no_drama::memory::MemorySource;
-use no_drama::{memory, rank_bank, MemoryTupleTimer};
+use no_drama::{memory, rank_bank};
 use serde::Deserialize;
 use std::fs::File;
 

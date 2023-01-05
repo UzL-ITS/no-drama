@@ -3,7 +3,7 @@ use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
 use no_drama::memory::MemorySource;
-use no_drama::{construct_timer_from_cli_arg, memory, MemoryTupleTimer};
+use no_drama::{construct_timer_from_cli_arg, memory};
 use std::path::PathBuf;
 
 ///Program to sample the access time between random addresses from DRAM (i.e. the program

@@ -94,7 +94,7 @@ fn main() -> Result<()> {
     let mut diff_set_bit_tuples_histogram = HashMap::new();
     let mut bank_fn_bit_mismatch_count = vec![0; dram_fns.rank_bank_function.len()];
     let mut bank_fn_bit_encounter_count = vec![0; dram_fns.rank_bank_function.len()];
-    let mut bit_13_is_one = 0;
+    let bit_13_is_one = 0;
 
     for entry in row_conflict_tuples.iter() {
         let bank_a = dram_fns.bank_rank_addr(entry.paddr_a);
