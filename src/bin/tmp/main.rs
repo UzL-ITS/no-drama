@@ -3,7 +3,7 @@ use clap::Parser;
 use itertools::Itertools;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::{LinuxPageMap, MemorySource};
-use no_drama::{memory, DefaultMemoryTupleTimer, MemoryTupleTimer};
+use no_drama::{construct_timer_from_cli_arg, memory, MemoryTupleTimer};
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -89,7 +89,9 @@ fn main() -> Result<()> {
     )
     .with_context(|| "Failed to create buffer")?;
 
-    let timer = Box::new(DefaultMemoryTupleTimer {});
+    let timer = Box::new(
+        construct_timer_from_cli_arg("rdtsc").with_context(|| "failed to instantiate timer")?,
+    );
 
     eprintln!("Conflict above {}", args.conflict_threshold);
     eprintln!("No conflict below {}", args.no_conflict_threshold);

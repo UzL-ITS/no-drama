@@ -3,7 +3,7 @@ use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
 use no_drama::memory::MemorySource;
-use no_drama::{memory, rank_bank, DefaultMemoryTupleTimer, MemoryTupleTimer};
+use no_drama::{memory, rank_bank, MemoryTupleTimer};
 use serde::Deserialize;
 use std::fs::File;
 
@@ -109,7 +109,10 @@ fn main() -> Result<()> {
     )
     .with_context(|| "Failed to create buffer")?;
 
-    let timer = Box::new(DefaultMemoryTupleTimer {});
+    let timer = Box::new(
+        no_drama::construct_timer_from_cli_arg("rdtsc")
+            .with_context(|| "failed to instantitate timer")?,
+    );
 
     //
     // Program Logic

@@ -3,10 +3,7 @@ use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
 use no_drama::memory::MemorySource;
-use no_drama::{
-    construct_timer_from_cli_arg, memory, CountingThreadTupleTimer, DefaultMemoryTupleTimer,
-    MemoryTupleTimer,
-};
+use no_drama::{construct_timer_from_cli_arg, memory, MemoryTupleTimer};
 use std::path::PathBuf;
 
 ///Program to sample the access time between random addresses from DRAM (i.e. the program
@@ -90,23 +87,26 @@ fn main() -> Result<(), anyhow::Error> {
 
         let mut access_times = Vec::new();
         for (off1, off2) in offsets1.iter().zip(offsets2) {
+            let timing;
             unsafe {
-                access_times.push(
-                    timer.time_subsequent_access_from_ram(
-                        buf.offset(*off1)
-                            .with_context(|| {
-                                format!("failed to get offset {:x} from memory buffer", off1)
-                            })?
-                            .ptr,
-                        buf.offset(*off2)
-                            .with_context(|| {
-                                format!("failed to get offset {:x} from memory buffer", off2)
-                            })?
-                            .ptr,
-                        args.rounds_per_measurement,
-                    ),
+                timing = timer.time_subsequent_access_from_ram(
+                    buf.offset(*off1)
+                        .with_context(|| {
+                            format!("failed to get offset {:x} from memory buffer", off1)
+                        })?
+                        .ptr,
+                    buf.offset(*off2)
+                        .with_context(|| {
+                            format!("failed to get offset {:x} from memory buffer", off2)
+                        })?
+                        .ptr,
+                    args.rounds_per_measurement,
                 );
             }
+            if timing > 1000 {
+                eprintln!("access time peak: {} at idx {}", timing, access_times.len())
+            }
+            access_times.push(timing);
         }
 
         let output_file_path: PathBuf = [

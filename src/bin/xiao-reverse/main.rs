@@ -4,9 +4,7 @@ use itertools::Itertools;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use no_drama::memory::LinuxPageMap;
 use no_drama::rank_bank::DramAnalyzer;
-use no_drama::{
-    construct_timer_from_cli_arg, memory, CountingThreadTupleTimer, DefaultMemoryTupleTimer,
-};
+use no_drama::{construct_timer_from_cli_arg, memory, DefaultMemoryTupleTimer};
 use petgraph::dot::{Config, Dot};
 use petgraph::{Graph, Undirected};
 use serde::Serialize;

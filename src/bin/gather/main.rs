@@ -1,11 +1,11 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use nix::sys::mman::{MapFlags, ProtFlags};
+use no_drama::memory;
 use no_drama::memory::{
     LinuxPageMap, MemoryAddress, MemoryBuffer, MemorySource, VirtToPhysResolver,
 };
 use no_drama::MemoryTupleTimer;
-use no_drama::{memory, DefaultMemoryTupleTimer};
 use rand::{Rng, SeedableRng};
 
 #[derive(Parser, Debug)]
@@ -86,7 +86,7 @@ fn get_pseudo_random_offset(
 }
 
 fn sample_row_conflict_tuples(
-    timer: Box<DefaultMemoryTupleTimer>,
+    timer: Box<dyn MemoryTupleTimer>,
     buf: &mut Box<MemoryBuffer>,
     args: &CliArgs,
 ) -> Result<Vec<(MemoryAddress, MemoryAddress, u64)>> {
@@ -172,14 +172,17 @@ fn main() -> Result<()> {
     )
     .with_context(|| "Failed to create buffer")?;
 
-    let timer = Box::new(DefaultMemoryTupleTimer {});
+    let timer = Box::new(
+        no_drama::construct_timer_from_cli_arg("rdtsc")
+            .with_context(|| "failed to instantiate timer")?,
+    );
 
     //
     // Program Logic
     //
 
     if args.mode == "row-conflict" {
-        let samples = sample_row_conflict_tuples(timer, &mut Box::new(buf), &args)
+        let samples = sample_row_conflict_tuples(*timer, &mut Box::new(buf), &args)
             .with_context(|| "failed to samples row conflict tuples")?;
 
         let mut wtr =
