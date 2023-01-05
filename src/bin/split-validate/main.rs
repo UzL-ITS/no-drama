@@ -95,6 +95,7 @@ fn main() -> Result<()> {
     let mut bank_fn_bit_mismatch_count = vec![0; dram_fns.rank_bank_function.len()];
     let mut bank_fn_bit_encounter_count = vec![0; dram_fns.rank_bank_function.len()];
     let bit_13_is_one = 0;
+    let mut row_fn_bit_encounter_count = vec![0; dram_fns.row_function.len()];
 
     for entry in row_conflict_tuples.iter() {
         let bank_a = dram_fns.bank_rank_addr(entry.paddr_a);
@@ -104,6 +105,12 @@ fn main() -> Result<()> {
             //if at least one bit from bank_bit_fn is set in the xor diff
             if ((entry.paddr_a ^ entry.paddr_b) & bank_bit_fn) != 0 {
                 bank_fn_bit_encounter_count[idx] += 1;
+            }
+        }
+
+        for (idx, row_bit_fn) in dram_fns.row_function.iter().enumerate() {
+            if ((entry.paddr_a ^ entry.paddr_b) & row_bit_fn) != 0 {
+                row_fn_bit_encounter_count[idx] += 1;
             }
         }
 
@@ -200,6 +207,7 @@ fn main() -> Result<()> {
             .collect::<Vec<f64>>()
     );
     eprintln!("bank_fn encounter count {:?}", bank_fn_bit_encounter_count);
+    eprintln!("row_fn encounter count {:?}", row_fn_bit_encounter_count);
 
     eprintln!("Bit 13 is one: {}", bit_13_is_one);
 
