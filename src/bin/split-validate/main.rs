@@ -157,16 +157,18 @@ fn main() -> Result<()> {
                     }
                 }
             }
-        }
-        if dram_fns
-            .row_addr(entry.paddr_a)
-            .eq(&dram_fns.row_addr(entry.paddr_b))
-        {
-            eprintln!(
+        } else {
+            // a and b are in the same bank
+            if dram_fns
+                .row_addr(entry.paddr_a)
+                .eq(&dram_fns.row_addr(entry.paddr_b))
+            {
+                eprintln!(
                     "{:x} and {:x} (xor diff {:09x})\t have row conflict timing {} but address function says SAME ROW ",
                     entry.paddr_a,entry.paddr_b,entry.paddr_a ^ entry.paddr_b,entry.timing
                 );
-            error_counter += 1;
+                error_counter += 1;
+            }
         }
     }
     eprintln!("done!");
