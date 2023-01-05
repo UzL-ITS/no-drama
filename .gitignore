@@ -3,3 +3,5 @@ Cargo.lock
 /target-sshfs/
 build-and-deploy-remote.sh
 /private/
+/esprimo3/
+/icelake/
