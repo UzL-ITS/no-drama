@@ -1,8 +1,11 @@
-use super::memory::{MemoryAddress, MemoryBuffer, MemorySource};
-use crate::MemoryTupleTimer;
-use anyhow::{bail, Context, Result};
 use std::collections::hash_set::HashSet;
 use std::collections::HashMap;
+
+use anyhow::{bail, Context, Result};
+
+use crate::MemoryTupleTimer;
+
+use super::memory::{MemoryAddress, MemoryBuffer, MemorySource};
 
 /// parity returns 1 if an odd number of bits is set, else 0
 /// Taken from Hacker's delight 2nd edition, p. 96 by Henry S. Warren Jr.
@@ -132,6 +135,7 @@ impl Iterator for XBitPermutationIter {
 #[cfg(test)]
 mod test_x_bit_permutation_iter {
     use super::XBitPermutationIter;
+
     #[test]
     fn test_permutations_simple() {
         let perm_iter = XBitPermutationIter::new(2, 3, 0);
@@ -848,14 +852,17 @@ impl MemoryTupleTimer for MockMemoryTimer {
 
 #[cfg(test)]
 mod test {
-    use super::super::memory::MemoryBuffer;
-    use super::super::MemoryTupleTimer;
-    use super::MockMemoryTimer;
+    use std::collections::HashSet;
+
+    use nix::sys::mman::{MapFlags, ProtFlags};
+
     use crate::memory;
     use crate::memory::MemoryAddress;
-    use crate::rank_bank::{evaluate_addr_function, parity, DramAnalyzer};
-    use nix::sys::mman::{MapFlags, ProtFlags};
-    use std::collections::HashSet;
+    use crate::rank_bank::{DramAnalyzer, evaluate_addr_function, parity};
+
+    use super::MockMemoryTimer;
+    use super::super::memory::MemoryBuffer;
+    use super::super::MemoryTupleTimer;
 
     #[test]
     fn test_parity() {
@@ -922,7 +929,7 @@ mod test {
             //alloc real memory buffer but without hugepages
             let memory_source = MemoryBuffer::new(
                 1024 * 1024 * 200,
-                ProtFlags::PROT_READ,
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_POPULATE,
                 mock_virt_to_phys,
             )
@@ -1014,7 +1021,7 @@ mod test {
             //alloc real memory buffer but without hugepages
             let memory_source = MemoryBuffer::new(
                 1024 * 1024 * 200,
-                ProtFlags::PROT_READ,
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_POPULATE,
                 mock_virt_to_phys,
             )
