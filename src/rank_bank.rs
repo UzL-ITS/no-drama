@@ -858,11 +858,11 @@ mod test {
 
     use crate::memory;
     use crate::memory::MemoryAddress;
-    use crate::rank_bank::{DramAnalyzer, evaluate_addr_function, parity};
+    use crate::rank_bank::{evaluate_addr_function, parity, DramAnalyzer};
 
-    use super::MockMemoryTimer;
     use super::super::memory::MemoryBuffer;
     use super::super::MemoryTupleTimer;
+    use super::MockMemoryTimer;
 
     #[test]
     fn test_parity() {
